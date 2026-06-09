@@ -1,0 +1,16 @@
+# Smithery deployment manifest (stdio). Adjust to the current Smithery schema if needed.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      cdpUrl:
+        type: string
+        default: "http://127.0.0.1:9222"
+        description: CDP endpoint of a running Chrome (e.g. started by chrome-cdp)
+  commandFunction: |-
+    (config) => ({
+      command: 'python',
+      args: ['mcp-server/server.py'],
+      env: { CDP_URL: (config && config.cdpUrl) || 'http://127.0.0.1:9222' }
+    })

@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+# cdp-repl — persistent Playwright REPL bound to a Chrome CDP endpoint.
+#
+# It connects ONCE over CDP and then listens on a Unix socket. Each client
+# connection sends a snippet of Python, the snippet runs against the live
+# browser, and stdout is sent back. Because the browser/context/page handles
+# are preserved across calls, per-call overhead drops from ~750ms
+# (subprocess + import + CDP-connect every time) to ~30ms (socket round-trip)
+# — about 25x faster for any multi-step automation.
+#
+# Launched automatically by chrome-cdp once Chrome's debug port is up.
+# Client: `echo 'print(page().title())' | cdp-eval`
+#
+# Config via environment:
+#   CDP_PORT  (9222)               Chrome remote-debugging port to attach to
+#   CDP_SOCK  (/tmp/cdp_repl.sock) Unix socket this server listens on
+import sys, os, socket, traceback, contextlib, io
+from playwright.sync_api import sync_playwright
+
+CDP_PORT = os.environ.get("CDP_PORT", "9222")           # which Chrome to attach to
+SOCK = os.environ.get("CDP_SOCK", "/tmp/cdp_repl.sock")  # control socket path
+
+# Clear any stale socket from a previous run so bind() can succeed.
+try:
+    os.unlink(SOCK)
+except FileNotFoundError:
+    pass
+
+# One CDP connection, reused for the whole process lifetime.
+p = sync_playwright().start()
+browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
+ctx = browser.contexts[0]                                # the default browser context
+
+
+def page():
+    """Last open tab, or a new one if none exist."""
+    return ctx.pages[-1] if ctx.pages else ctx.new_page()
+
+
+def find(url_substr):
+    """Return the first tab whose URL contains url_substr, else None."""
+    for pg in ctx.pages:
+        if url_substr in pg.url:
+            return pg
+    return None
+
+
+def wait(css, timeout=10000, state="visible"):
+    """Element-based wait — returns as soon as the selector is ready.
+    Prefer this over fixed sleeps: faster AND race-free."""
+    return page().wait_for_selector(css, timeout=timeout, state=state)
+
+
+# Bind the control socket (owner-only permissions).
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(SOCK)
+s.listen(4)
+os.chmod(SOCK, 0o600)
+
+# Names exposed to every snippet the client sends.
+ns = {"browser": browser, "ctx": ctx, "page": page, "find": find, "wait": wait}
+print(f"[cdp-repl] listening on {SOCK} (CDP :{CDP_PORT})", flush=True)
+
+while True:
+    conn, _ = s.accept()                                 # one request per connection
+    buf = b""
+    while True:                                          # read until the end marker
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+        if buf.endswith(b"\n##END##\n"):
+            break
+    code = buf.decode("utf-8").rsplit("\n##END##\n", 1)[0]
+    out = io.StringIO()                                  # capture the snippet's stdout
+    try:
+        with contextlib.redirect_stdout(out):
+            exec(code, ns)                               # run against the live browser
+        reply = out.getvalue() + "OK\n"
+    except Exception:
+        reply = out.getvalue() + "ERR:\n" + traceback.format_exc()
+    try:
+        conn.sendall(reply.encode("utf-8"))
+    except BrokenPipeError:
+        pass
+    conn.close()

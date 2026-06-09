@@ -1,0 +1,5 @@
+# Core dependency — the REPL and all templates use Playwright.
+playwright>=1.40
+
+# Optional, for the heavier anti-bot tier (uncomment if needed):
+# camoufox            # stealth Firefox build

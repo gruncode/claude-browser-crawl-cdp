@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# chrome-cdp — launch Chrome with a CDP debug port and a DEDICATED automation
+# profile, then auto-start the persistent Playwright REPL (cdp-repl).
+#
+# Why a dedicated profile: it keeps automation logins/cookies completely
+# separate from your everyday browser, and lets Playwright attach over CDP
+# without ever touching your personal tabs.
+#
+# Usage:   chrome-cdp [extra-chrome-args]
+# Connect: playwright .connect_over_cdp("http://127.0.0.1:9222")
+# Check:   curl -s http://127.0.0.1:9222/json/version | head -2
+#
+# Configurable via environment (defaults in parentheses):
+#   CDP_PORT     (9222)                    remote-debugging port
+#   CDP_PROFILE  (~/.config/chrome-cdp)    dedicated profile dir — NOT your daily Chrome
+#   CHROME_BIN   (auto-detected)           path/name of the Chrome/Chromium binary
+#   CDP_PYTHON   (python3)                  python that can import playwright (your venv)
+#   CDP_BIN_DIR  (dir of this script)       where cdp-repl lives
+set -euo pipefail
+
+# --- resolve config (env override, else default) ---------------------------
+CDP_PORT="${CDP_PORT:-9222}"                                   # debug port
+CDP_PROFILE="${CDP_PROFILE:-$HOME/.config/chrome-cdp}"         # isolated profile
+CDP_PYTHON="${CDP_PYTHON:-python3}"                            # python w/ playwright
+CDP_BIN_DIR="${CDP_BIN_DIR:-$(cd "$(dirname "$0")" && pwd)}"   # sibling scripts
+
+# --- locate a Chrome/Chromium binary if not given -------------------------
+CHROME_BIN="${CHROME_BIN:-}"                                   # allow explicit override
+if [ -z "$CHROME_BIN" ]; then                                 # otherwise probe common names
+  for c in google-chrome google-chrome-stable /opt/google/chrome/chrome chromium chromium-browser; do
+    command -v "$c" >/dev/null 2>&1 && { CHROME_BIN="$c"; break; }   # first hit wins
+  done
+fi
+[ -n "$CHROME_BIN" ] || { echo "chrome-cdp: Chrome not found — set CHROME_BIN" >&2; exit 1; }
+
+# Some environments preload jemalloc via LD_PRELOAD, which can crash Chrome's
+# zygote process. Drop it for the browser only.
+unset LD_PRELOAD
+
+# --- auto-start the persistent Playwright REPL once the port is live -------
+# Backgrounded poll; skipped if a REPL is already running. The REPL keeps a
+# live CDP connection so each later call is a ~30ms socket round-trip (25x
+# faster than re-spawning Python+Playwright every time).
+(
+  until curl -sf "http://127.0.0.1:${CDP_PORT}/json/version" >/dev/null 2>&1; do sleep 0.5; done
+  pgrep -f "${CDP_BIN_DIR}/cdp-repl" >/dev/null \
+    || CDP_PORT="$CDP_PORT" nohup "$CDP_PYTHON" "${CDP_BIN_DIR}/cdp-repl" >>/tmp/cdp-repl.log 2>&1 &
+) &
+
+# --- launch Chrome (replaces this shell) -----------------------------------
+# --disable-gpu is a safe default: headed rendering crashes on some Linux GPUs.
+# Remove it if your hardware renders fine and you want acceleration.
+exec "$CHROME_BIN" \
+  --remote-debugging-port="${CDP_PORT}" \
+  --user-data-dir="${CDP_PROFILE}" \
+  --disable-gpu \
+  --no-first-run \
+  --no-default-browser-check \
+  "$@"

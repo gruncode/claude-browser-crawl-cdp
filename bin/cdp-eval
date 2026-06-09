@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+# cdp-eval — tiny client for cdp-repl. Reads Python from stdin, sends it to the
+# running REPL over the Unix socket, prints whatever comes back.
+#
+# Example: echo 'print(page().title())' | cdp-eval
+#          echo 'wait("button[type=submit]"); page().click("button[type=submit]")' | cdp-eval
+#
+# Config: CDP_SOCK (/tmp/cdp_repl.sock) — must match the server's socket.
+import socket, sys, os
+
+SOCK = os.environ.get("CDP_SOCK", "/tmp/cdp_repl.sock")  # control socket path
+
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(SOCK)                                          # fails fast if REPL is down
+code = sys.stdin.read() + "\n##END##\n"                  # append the end marker
+s.sendall(code.encode("utf-8"))
+s.shutdown(socket.SHUT_WR)                               # signal "done sending"
+
+data = b""
+while True:                                              # read the full reply
+    c = s.recv(65536)
+    if not c:
+        break
+    data += c
+sys.stdout.write(data.decode("utf-8", errors="replace"))
